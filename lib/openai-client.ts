@@ -1,28 +1,10 @@
-"use server"
-
-import { generateText } from "ai"
-import { createOpenAI } from "@ai-sdk/openai"
+// Client-side OpenAI API calls for GitHub Pages deployment
 
 interface VocabularyItem {
   id: string
   german: string
   english: string
   context: string
-}
-
-function getApiKey(clientKey?: string): string {
-  const key = clientKey?.trim() || process.env.OPENAI_API_KEY?.trim() || ""
-
-  if (!key) {
-    throw new Error("missing_api_key")
-  }
-
-  return key
-}
-
-function getProvider(apiKey?: string) {
-  const key = getApiKey(apiKey)
-  return createOpenAI({ apiKey: key })
 }
 
 export async function translateText(
@@ -35,31 +17,57 @@ export async function translateText(
     throw new Error("No text provided for translation")
   }
 
+  if (!apiKey?.trim()) {
+    throw new Error("missing_api_key")
+  }
+
   try {
     const sourceLang = sourceLanguage === "de" ? "German" : "English"
     const targetLang = targetLanguage === "en" ? "English" : "German"
 
-    const provider = getProvider(apiKey)
-    const { text: translation } = await generateText({
-      model: provider("gpt-4o"),
-      prompt: `Translate the following text from ${sourceLang} to ${targetLang}. Provide ONLY the direct translation, with no additional text or explanations.
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'user',
+            content: `Translate the following text from ${sourceLang} to ${targetLang}. Provide ONLY the direct translation, with no additional text or explanations.
 
 Text to translate: "${text}"
 
-Translation:`,
-      temperature: 0,
-      maxTokens: 200,
+Translation:`
+          }
+        ],
+        temperature: 0,
+        max_tokens: 200,
+      }),
     })
 
-    const result = translation.trim().replace(/^"|"$/g, "")
-    if (!result) {
+    if (!response.ok) {
+      const error = await response.json()
+      if (response.status === 429) {
+        throw new Error("quota_exceeded")
+      }
+      throw new Error(error.error?.message || "Translation failed")
+    }
+
+    const data = await response.json()
+    const translation = data.choices?.[0]?.message?.content?.trim()
+
+    if (!translation) {
       throw new Error("Empty translation received")
     }
-    return result
+
+    return translation.replace(/^"|"$/g, "") // Remove quotes
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     console.error("Translation error:", msg)
-    if (msg.includes("current quota")) {
+    if (msg.includes("quota") || msg.includes("429")) {
       throw new Error("quota_exceeded")
     }
     throw new Error(`Translation failed: ${msg}`)
@@ -71,12 +79,23 @@ export async function extractVocabulary(
   englishTranslation: string,
   apiKey?: string,
 ): Promise<VocabularyItem[]> {
-  try {
-    const provider = getProvider(apiKey)
+  if (!apiKey?.trim()) {
+    return []
+  }
 
-    const { text: vocabularyJson } = await generateText({
-      model: provider("gpt-3.5-turbo"),
-      prompt: `Extract 3-6 key German vocabulary words from this text. Focus on words that would be highlighted for language learning.
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'user',
+            content: `Extract 3-6 key German vocabulary words from this text. Focus on words that would be highlighted for language learning.
 
 German text: "${germanText}"
 English translation: "${englishTranslation}"
@@ -99,12 +118,26 @@ Rules:
 - Include useful expressions and phrases
 - Return valid JSON only, no other text
 
-JSON:`,
-      temperature: 0.1,
-      maxTokens: 1000,
+JSON:`
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 1000,
+      }),
     })
 
-    let cleanJson = vocabularyJson.trim()
+    if (!response.ok) {
+      return []
+    }
+
+    const data = await response.json()
+    const vocabularyJson = data.choices?.[0]?.message?.content?.trim()
+
+    if (!vocabularyJson) {
+      return []
+    }
+
+    let cleanJson = vocabularyJson
     if (cleanJson.startsWith("```json")) {
       cleanJson = cleanJson.replace(/```json\s*/, "").replace(/```\s*$/, "")
     }
@@ -126,7 +159,7 @@ JSON:`,
         context: item.context || germanText,
       }))
       .filter((item) => item.german && item.english)
-      .slice(0, 6) // Limit to 6 items to avoid overwhelming
+      .slice(0, 6)
   } catch (error) {
     console.error("Vocabulary extraction error:", error)
     return []

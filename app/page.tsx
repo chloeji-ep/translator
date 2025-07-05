@@ -2,13 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Settings, Mic, Volume2, Languages, AlertTriangle, BookOpen, Trash2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
-import { Input } from "@/components/ui/input"
-import { useToast } from "@/hooks/use-toast"
-import { translateText, testTranslationAPI, extractVocabulary } from "./actions"
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger, SheetFooter } from "@/components/ui/sheet"
-import { cn } from "@/lib/utils"
+import { Button } from "../components/ui/button"
+import { Label } from "../components/ui/label"
+import { Input } from "../components/ui/input"
+import { useToast } from "../hooks/use-toast"
+import { translateText, testTranslationAPI, extractVocabulary } from "../lib/openai-client"
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger, SheetFooter } from "../components/ui/sheet"
+import { cn } from "../lib/utils"
 
 interface VocabularyItem {
   id: string
@@ -27,18 +27,32 @@ interface ConversationEntry {
 }
 
 const Highlight = ({ text, keywords }: { text: string; keywords: string[] }) => {
-  if (!keywords?.length) {
+  if (!keywords?.length || !text) {
     return <>{text}</>
   }
-  const regex = new RegExp(`\\b(${keywords.join("|")})\\b`, "gi")
+  
+  // Create a more robust regex that handles German text better
+  const escapedKeywords = keywords.map(kw => kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const regex = new RegExp(`(${escapedKeywords.join("|")})`, "gi")
+  
   const parts = text.split(regex)
 
   return (
     <>
       {parts.map((part, index) => {
-        const isKeyword = keywords.some((kw) => kw.toLowerCase() === part.toLowerCase())
+        if (!part) return null
+        
+        const isKeyword = keywords.some((kw) => 
+          kw.toLowerCase() === part.toLowerCase() || 
+          part.toLowerCase().includes(kw.toLowerCase()) ||
+          kw.toLowerCase().includes(part.toLowerCase())
+        )
+        
         return isKeyword ? (
-          <span key={index} className="text-green-600 font-semibold">
+          <span 
+            key={index} 
+            className="bg-green-100 text-green-800 px-1 py-0.5 rounded font-semibold border border-green-300"
+          >
             {part}
           </span>
         ) : (
@@ -48,6 +62,15 @@ const Highlight = ({ text, keywords }: { text: string; keywords: string[] }) => 
     </>
   )
 }
+
+// Common German words to highlight immediately (before AI processing)
+const COMMON_GERMAN_WORDS = [
+  "hallo", "guten", "tag", "morgen", "abend", "danke", "bitte", "entschuldigung",
+  "sprechen", "verstehen", "können", "möchten", "haben", "sein", "gehen", "kommen",
+  "haus", "auto", "wasser", "brot", "milch", "kaffee", "tee", "restaurant",
+  "bahnhof", "flughafen", "hotel", "zimmer", "rechnung", "hilfe", "problem",
+  "gut", "schlecht", "groß", "klein", "teuer", "billig", "schön", "hässlich"
+]
 
 export default function TranslationApp() {
   const [isListening, setIsListening] = useState(false)
@@ -189,7 +212,7 @@ export default function TranslationApp() {
     [apiKey, handleApiError, providedKey, hasKey, toast],
   )
 
-  const startListening = () => {
+  const startListening = async () => {
     if (!hasKey) {
       toast({
         title: "OpenAI key required",
@@ -198,16 +221,65 @@ export default function TranslationApp() {
       })
       return
     }
-    if (!recognitionRef.current) return
+
+    if (!recognitionRef.current) {
+      toast({
+        title: "Speech Recognition Not Available",
+        description: "Your browser doesn't support speech recognition. Please use Chrome or Edge.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Request microphone permission explicitly
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (error) {
+      toast({
+        title: "Microphone Permission Denied",
+        description: "Please allow microphone access and try again.",
+        variant: "destructive",
+      })
+      return
+    }
 
     setLiveTranscript("")
     const recognition = recognitionRef.current
 
-    recognition.onstart = () => setIsListening(true)
-    recognition.onend = () => setIsListening(false)
+    recognition.onstart = () => {
+      setIsListening(true)
+      console.log("Speech recognition started")
+    }
+    
+    recognition.onend = () => {
+      setIsListening(false)
+      console.log("Speech recognition ended")
+    }
+    
     recognition.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error)
-      toast({ title: "Speech Recognition Error", description: `Error: ${event.error}`, variant: "destructive" })
+      setIsListening(false)
+      
+      let errorMessage = "Unknown error occurred"
+      switch (event.error) {
+        case "not-allowed":
+          errorMessage = "Microphone access denied. Please allow microphone access."
+          break
+        case "no-speech":
+          errorMessage = "No speech detected. Please try again."
+          break
+        case "network":
+          errorMessage = "Network error. Please check your connection."
+          break
+        default:
+          errorMessage = `Error: ${event.error}`
+      }
+      
+      toast({ 
+        title: "Speech Recognition Error", 
+        description: errorMessage, 
+        variant: "destructive" 
+      })
     }
 
     recognition.onresult = (event: any) => {
@@ -231,8 +303,14 @@ export default function TranslationApp() {
 
     try {
       recognition.start()
+      console.log("Attempting to start speech recognition...")
     } catch (error) {
       console.error("Could not start recognition:", error)
+      toast({
+        title: "Failed to Start",
+        description: "Could not start speech recognition. Please try again.",
+        variant: "destructive",
+      })
     }
   }
 
@@ -405,10 +483,22 @@ export default function TranslationApp() {
             </div>
           ))}
           {isListening && (
-            <div className="space-y-3 pt-4">
+            <div className="space-y-3 pt-4 border-2 border-green-200 rounded-lg p-4 bg-green-50">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-muted-foreground px-2 py-1 bg-muted rounded-md">DE</span>
-                <p className="text-muted-foreground flex-1 animate-pulse">{liveTranscript || "Listening..."}</p>
+                <span className="text-xs font-semibold text-green-700 px-2 py-1 bg-green-200 rounded-md">🎤 LIVE</span>
+                <div className="text-green-800 flex-1">
+                  {liveTranscript ? (
+                    <Highlight 
+                      text={liveTranscript} 
+                      keywords={[
+                        ...vocabulary.map(v => v.german).slice(-20), // Recent learned vocabulary
+                        ...COMMON_GERMAN_WORDS // Common German words for immediate highlighting
+                      ]} 
+                    />
+                  ) : (
+                    <span className="animate-pulse">Listening for German...</span>
+                  )}
+                </div>
               </div>
             </div>
           )}
